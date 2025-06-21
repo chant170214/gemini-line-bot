@@ -93,7 +93,24 @@ def handle_message(event):
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
     else:
         if authenticate_user(user_id, user_message):
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="認証が完了しました。ご質問をどうぞ。"))
+            # ↓↓↓ ここを修正しました！ ↓↓↓
+            welcome_message = "認証が完了しました。ご質問をどうぞ。"
+            
+            caution_message = (
+                "【ご利用上の注意】\n\n"
+                "・AIは時に誤った情報を生成することがあります。重要な情報は必ずご自身でご確認ください。\n"
+                "・1分間に15回を超えるような、極端に速い連続投稿はお控えください。\n\n"
+                "これらの点にご留意の上、AIとの対話をお楽しみください。"
+            )
+            
+            line_bot_api.reply_message(
+                event.reply_token,
+                [
+                    TextSendMessage(text=welcome_message),
+                    TextSendMessage(text=caution_message)
+                ]
+            )
+            # ↑↑↑ ここまでが修正箇所です！ ↑↑↑
         else:
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text="認証コードを入力してください。"))
 
