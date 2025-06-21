@@ -2,9 +2,13 @@ import os
 import sys
 import uuid
 from flask import Flask, request, abort
-from line_bot_sdk import LineBotApi, WebhookHandler
-from line_bot_sdk.exceptions import InvalidSignatureError
-from line_bot_sdk.models import MessageEvent, TextMessage, TextSendMessage
+
+# ↓↓↓ ここを修正しました ↓↓↓
+from linebot import LineBotApi, WebhookHandler
+from linebot.exceptions import InvalidSignatureError
+from linebot.models import MessageEvent, TextMessage, TextSendMessage
+# ↑↑↑ ここを修正しました ↑↑↑
+
 import google.generativeai as genai
 
 # --- 設定項目 ---
