@@ -3,3 +3,4 @@ line-bot-sdk
 google-generativeai
 gunicorn
 firebase-admin
+google-api-python-client
