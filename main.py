@@ -2,13 +2,16 @@ import os
 import sys
 import uuid
 import json
+import requests # ローディング表示用にインポート
 from flask import Flask, request, abort, jsonify
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
 import google.generativeai as genai
+from google.generativeai.types import HarmCategory, HarmBlockThreshold
 import firebase_admin
 from firebase_admin import credentials, db
+from googleapiclient.discovery import build
 
 # --- 設定項目 ---
 # 環境変数から設定を読み込む
@@ -18,11 +21,11 @@ gemini_api_key = os.environ.get("GEMINI_API_KEY", "")
 admin_secret = os.environ.get("ADMIN_SECRET", "DEFAULT_SECRET_CHANGE_ME")
 firebase_database_url = os.environ.get("FIREBASE_DATABASE_URL", "")
 firebase_credentials_json = os.environ.get("FIREBASE_CREDENTIALS_JSON", "")
-# ↓↓↓ 新しい環境変数を読み込みます！ ↓↓↓
-system_prompt = os.environ.get("SYSTEM_PROMPT", "あなたは親切なアシスタントです。日本語で回答してください。")
+search_api_key = os.environ.get("SEARCH_API_KEY", "")
+search_engine_id = os.environ.get("SEARCH_ENGINE_ID", "")
 
-# --- 新しい定数 ---
-MAX_HISTORY_LENGTH = 10 
+# --- 定数 ---
+MAX_HISTORY_LENGTH = 30 
 
 # --- Firebaseの初期化 ---
 try:
@@ -36,29 +39,66 @@ try:
 except Exception as e:
     print(f"Firebase初期化エラー: {e}")
 
+# --- ローディング表示関数 (NEW!) ---
+def display_loading_animation(user_id):
+    """ユーザーの画面にローディングアニメーションを表示する"""
+    headers = {
+        'Authorization': f'Bearer {channel_access_token}',
+        'Content-Type': 'application/json'
+    }
+    data = {
+        'chatId': user_id,
+        'loadingSeconds': 20 # 最大60秒まで設定可能
+    }
+    try:
+        response = requests.post('https://api.line.me/v2/bot/chat/loading/start', headers=headers, json=data)
+        response.raise_for_status()
+        print(f"ローディング表示成功: {user_id}")
+    except requests.exceptions.RequestException as e:
+        print(f"ローディング表示エラー: {e}")
+
+# --- Web検索関数 (変更なし) ---
+def google_search(query: str) -> dict:
+    """最新の情報、特定の事実、時事問題、天気、株価など、リアルタイムの情報が必要な場合にウェブを検索します。"""
+    print(f"Executing Google Search for: {query}")
+    if not search_api_key or not search_engine_id:
+        return {"error": "検索機能が設定されていません。"}
+    try:
+        service = build("customsearch", "v1", developerKey=search_api_key)
+        res = service.cse().list(q=query, cx=search_engine_id, num=3).execute()
+        if 'items' not in res:
+            return {"result": "検索結果が見つかりませんでした。"}
+        search_results = []
+        for item in res['items']:
+            title = item.get('title', '')
+            link = item.get('link', '')
+            snippet = item.get('snippet', '').replace('\n', '')
+            search_results.append(f"タイトル: {title}\n概要: {snippet}\nURL: {link}")
+        return {"search_results": "\n\n---\n\n".join(search_results)}
+    except Exception as e:
+        print(f"Google Search Error: {e}")
+        return {"error": f"検索中にエラーが発生しました: {e}"}
+
+# --- Geminiモデルの初期化 (変更なし) ---
+genai.configure(api_key=gemini_api_key)
+model = genai.GenerativeModel('gemini-1.5-flash', tools=[google_search])
+
 # --- 初期化 ---
 app = Flask(__name__)
 line_bot_api = LineBotApi(channel_access_token)
 handler = WebhookHandler(channel_secret)
-
-# --- Gemini APIの初期化を改造！ ---
-genai.configure(api_key=gemini_api_key)
-# ↓↓↓ ここでシステムプロンプトを設定します！ ↓↓↓
-model = genai.GenerativeModel(
-    'gemini-1.5-flash',
-    system_instruction=system_prompt
-)
 
 # --- 会話履歴関連の関数 (変更なし) ---
 def get_conversation_history(user_id):
     ref = db.reference(f'/conversation_history/{user_id}')
     history = ref.get()
     if history is None: return []
-    return history[-MAX_HISTORY_LENGTH:]
+    return [genai.types.Content(**msg) for msg in history][-MAX_HISTORY_LENGTH:]
 
 def save_conversation_history(user_id, history):
     ref = db.reference(f'/conversation_history/{user_id}')
-    ref.set(history)
+    serializable_history = [genai.types.Content.to_dict(msg) for msg in history]
+    ref.set(serializable_history)
 
 def reset_conversation_history(user_id):
     ref = db.reference(f'/conversation_history/{user_id}')
@@ -90,7 +130,7 @@ def callback():
         abort(400)
     return 'OK'
 
-# --- メッセージ処理 (変更なし) ---
+# --- メッセージ処理を最終形態に！ ---
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_id = event.source.user_id
@@ -110,17 +150,41 @@ def handle_message(event):
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text="会話の履歴をリセットしました。"))
         return
 
+    # --- ここからがメイン処理 ---
     try:
+        # 1. ローディング表示を開始 (NEW!)
+        display_loading_animation(user_id)
+
+        # 2. 履歴を取得してチャットセッションを開始
         history = get_conversation_history(user_id)
-        history.append({"role": "user", "parts": [{"text": user_message}]})
-        response = model.generate_content(history)
+        chat = model.start_chat(history=history)
+
+        # 3. ユーザーのメッセージを送信
+        response = chat.send_message(user_message)
+        
+        # 4. 最終的な回答を取得
         reply_text = response.text
-        history.append({"role": "model", "parts": [{"text": reply_text}]})
-        save_conversation_history(user_id, history)
+
+        # 5. 検索が実行されたかチェック (NEW!)
+        searched_web = False
+        # chat.historyにはユーザーの質問とAIの応答の全履歴が入っている
+        # 最後のAIの応答(から2番目)にtool_callsがあれば検索したと判断
+        if len(chat.history) > 1 and chat.history[-2].parts[0].function_call:
+            searched_web = True
+
+        # 6. 検索した場合、前置きを追加 (NEW!)
+        if searched_web:
+            reply_text = "🌐 Webで検索しました。\n\n" + reply_text
+
+        # 7. 最新の会話履歴を保存
+        save_conversation_history(user_id, chat.history)
+
+        # 8. ユーザーに応答
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
+
     except Exception as e:
-        app.logger.error(f"Gemini API or History Error: {e}")
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="AIとの通信中にエラーが発生しました。「/reset」で会話をリセットしてみてください。"))
+        app.logger.error(f"Main process error: {e}")
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="申し訳ありません、エラーが発生しました。「/reset」で会話をリセットしてみてください。"))
 
 # --- 管理者用機能 (変更なし) ---
 @app.route("/admin/add_code", methods=['GET'])
