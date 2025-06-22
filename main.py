@@ -46,7 +46,7 @@ def display_loading_animation(user_id):
     except requests.exceptions.RequestException as e:
         print(f"ローディング表示エラー: {e}")
 
-# --- Web検索関数 ---
+# --- Web検索関数 (構文を修正) ---
 def google_search(query: str) -> dict:
     """最新の情報、特定の事実、時事問題、天気、株価など、リアルタイムの情報が必要な場合にウェブを検索します。"""
     print(f"Executing Google Search for: {query}")
@@ -57,8 +57,14 @@ def google_search(query: str) -> dict:
         res = service.cse().list(q=query, cx=search_engine_id, num=3).execute()
         if 'items' not in res:
             return {"result": "検索結果が見つかりませんでした。"}
-        search_results = [f"タイトル: {item.get('title', '')}\n概要: {item.get('snippet', '').replace('
-', '')}\nURL: {item.get('link', '')}" for item in res['items']]
+        
+        # ↓↓↓ ここの構文を修正しました！ ↓↓↓
+        search_results = [
+            f"タイトル: {item.get('title', '')}\n概要: {item.get('snippet', '').replace('\n', '')}\nURL: {item.get('link', '')}"
+            for item in res['items']
+        ]
+        # ↑↑↑ ここまでが修正箇所です！ ↑↑↑
+        
         return {"search_results": "\n\n---\n\n".join(search_results)}
     except Exception as e:
         print(f"Google Search Error: {e}")
@@ -73,17 +79,15 @@ app = Flask(__name__)
 line_bot_api = LineBotApi(channel_access_token)
 handler = WebhookHandler(channel_secret)
 
-# --- 会話履歴関連の関数 (安定版に修正) ---
+# --- 会話履歴関連の関数 ---
 def get_conversation_history(user_id):
     ref = db.reference(f'/conversation_history/{user_id}')
     history = ref.get()
     if history is None: return []
-    # 辞書のリストとしてそのまま返す
     return history[-MAX_HISTORY_LENGTH:]
 
 def save_conversation_history(user_id, history):
     ref = db.reference(f'/conversation_history/{user_id}')
-    # chat.historyはContentオブジェクトのリストなので、辞書に変換して保存
     serializable_history = [
         {'role': msg.role, 'parts': [{'text': part.text} for part in msg.parts]}
         for msg in history
@@ -120,7 +124,7 @@ def callback():
         abort(400)
     return 'OK'
 
-# --- メッセージ処理 (安定版に修正) ---
+# --- メッセージ処理 ---
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_id = event.source.user_id
@@ -143,26 +147,20 @@ def handle_message(event):
     try:
         display_loading_animation(user_id)
         
-        # 履歴を辞書のリストとして取得
         history = get_conversation_history(user_id)
-        
-        # チャットセッションを開始
         chat = model.start_chat(history=history)
-        
         response = chat.send_message(user_message)
         reply_text = response.text
 
-        # 検索が実行されたかチェック
         searched_web = False
+        # hasattrで安全にチェック
         if len(chat.history) > 1 and hasattr(chat.history[-2].parts[0], 'function_call'):
             searched_web = True
 
         if searched_web:
             reply_text = "🌐 Webで検索しました。\n\n" + reply_text
 
-        # 最新の会話履歴を保存
         save_conversation_history(user_id, chat.history)
-
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
 
     except Exception as e:
