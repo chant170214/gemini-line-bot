@@ -23,7 +23,7 @@ search_api_key = os.environ.get("SEARCH_API_KEY", "")
 search_engine_id = os.environ.get("SEARCH_ENGINE_ID", "")
 
 # --- 定数 ---
-MAX_HISTORY_LENGTH = 30 
+MAX_HISTORY_LENGTH = 10 
 
 # --- Firebaseの初期化 ---
 try:
@@ -66,9 +66,23 @@ def google_search(query: str) -> dict:
         print(f"Google Search Error: {e}")
         return {"error": f"検索中にエラーが発生しました: {e}"}
 
-# --- Geminiモデルの初期化 ---
+# --- Geminiモデルの初期化 (役割設定を強化！) ---
 genai.configure(api_key=gemini_api_key)
-model = genai.GenerativeModel('gemini-1.5-flash', tools=[google_search])
+
+# AIへのシステム指示 (役割設定)
+system_instruction = "あなたは、ユーザーを助ける優秀なAIアシスタントです。最新の情報や、あなたの知識にない事実、未来の出来事に関する質問には、ためらわずに`google_search`ツールを使ってウェブを検索し、その結果に基づいて回答してください。"
+
+# ツールの設定
+tool_config = {"function_calling_config": {"mode": "AUTO"}}
+
+model = genai.GenerativeModel(
+    model_name='gemini-1.5-flash',
+    system_instruction=system_instruction, # システム指示を追加
+    tools=[google_search],
+    tool_config=tool_config # ツール設定を追加
+)
+# --- ここまでが修正箇所です！ ---
+
 
 # --- 初期化 ---
 app = Flask(__name__)
@@ -144,36 +158,23 @@ def handle_message(event):
         display_loading_animation(user_id)
         
         history = get_conversation_history(user_id)
-        # ↓↓↓ ここから判定ロジックを修正しました！ ↓↓↓
-        
-        # 1. チャットセッションを開始
         chat = model.start_chat(history=history)
-        
-        # 2. ユーザーのメッセージを送信
         response = chat.send_message(user_message)
         
-        # 3. 検索が実行されたかを正確に判定
         searched_web = False
-        # 応答の裏側（候補）をチェック
         for candidate in response.candidates:
-            # 候補の中にfunction_callsがあれば検索したと判断
             if candidate.content.parts and candidate.content.parts[0].function_call:
                 searched_web = True
                 break
         
-        # 4. 最終的なテキストを取得
         reply_text = response.text
 
-        # 5. 検索した場合のみ、前置きを追加
         if searched_web:
             reply_text = "🌐 Webで検索しました。\n\n" + reply_text
 
-        # 6. 最新の会話履歴を保存
         save_conversation_history(user_id, chat.history)
 
-        # 7. ユーザーに応答
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
-        # ↑↑↑ ここまでが修正箇所です！ ↑↑↑
 
     except Exception as e:
         app.logger.error(f"Main process error: {e}")
