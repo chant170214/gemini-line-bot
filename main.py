@@ -46,7 +46,7 @@ def display_loading_animation(user_id):
     except requests.exceptions.RequestException as e:
         print(f"ローディング表示エラー: {e}")
 
-# --- Web検索関数 (構文を修正) ---
+# --- Web検索関数 ---
 def google_search(query: str) -> dict:
     """最新の情報、特定の事実、時事問題、天気、株価など、リアルタイムの情報が必要な場合にウェブを検索します。"""
     print(f"Executing Google Search for: {query}")
@@ -57,14 +57,10 @@ def google_search(query: str) -> dict:
         res = service.cse().list(q=query, cx=search_engine_id, num=3).execute()
         if 'items' not in res:
             return {"result": "検索結果が見つかりませんでした。"}
-        
-        # ↓↓↓ ここの構文を修正しました！ ↓↓↓
         search_results = [
             f"タイトル: {item.get('title', '')}\n概要: {item.get('snippet', '').replace('\n', '')}\nURL: {item.get('link', '')}"
             for item in res['items']
         ]
-        # ↑↑↑ ここまでが修正箇所です！ ↑↑↑
-        
         return {"search_results": "\n\n---\n\n".join(search_results)}
     except Exception as e:
         print(f"Google Search Error: {e}")
@@ -148,20 +144,36 @@ def handle_message(event):
         display_loading_animation(user_id)
         
         history = get_conversation_history(user_id)
+        # ↓↓↓ ここから判定ロジックを修正しました！ ↓↓↓
+        
+        # 1. チャットセッションを開始
         chat = model.start_chat(history=history)
+        
+        # 2. ユーザーのメッセージを送信
         response = chat.send_message(user_message)
+        
+        # 3. 検索が実行されたかを正確に判定
+        searched_web = False
+        # 応答の裏側（候補）をチェック
+        for candidate in response.candidates:
+            # 候補の中にfunction_callsがあれば検索したと判断
+            if candidate.content.parts and candidate.content.parts[0].function_call:
+                searched_web = True
+                break
+        
+        # 4. 最終的なテキストを取得
         reply_text = response.text
 
-        searched_web = False
-        # hasattrで安全にチェック
-        if len(chat.history) > 1 and hasattr(chat.history[-2].parts[0], 'function_call'):
-            searched_web = True
-
+        # 5. 検索した場合のみ、前置きを追加
         if searched_web:
             reply_text = "🌐 Webで検索しました。\n\n" + reply_text
 
+        # 6. 最新の会話履歴を保存
         save_conversation_history(user_id, chat.history)
+
+        # 7. ユーザーに応答
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
+        # ↑↑↑ ここまでが修正箇所です！ ↑↑↑
 
     except Exception as e:
         app.logger.error(f"Main process error: {e}")
