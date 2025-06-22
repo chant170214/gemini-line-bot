@@ -2,19 +2,17 @@ import os
 import sys
 import uuid
 import json
-import requests # ローディング表示用にインポート
+import requests
 from flask import Flask, request, abort, jsonify
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
 import google.generativeai as genai
-from google.generativeai.types import HarmCategory, HarmBlockThreshold
 import firebase_admin
 from firebase_admin import credentials, db
 from googleapiclient.discovery import build
 
 # --- 設定項目 ---
-# 環境変数から設定を読み込む
 channel_access_token = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
 channel_secret = os.environ.get("LINE_CHANNEL_SECRET", "")
 gemini_api_key = os.environ.get("GEMINI_API_KEY", "")
@@ -39,25 +37,16 @@ try:
 except Exception as e:
     print(f"Firebase初期化エラー: {e}")
 
-# --- ローディング表示関数 (NEW!) ---
+# --- ローディング表示関数 ---
 def display_loading_animation(user_id):
-    """ユーザーの画面にローディングアニメーションを表示する"""
-    headers = {
-        'Authorization': f'Bearer {channel_access_token}',
-        'Content-Type': 'application/json'
-    }
-    data = {
-        'chatId': user_id,
-        'loadingSeconds': 20 # 最大60秒まで設定可能
-    }
+    headers = {'Authorization': f'Bearer {channel_access_token}', 'Content-Type': 'application/json'}
+    data = {'chatId': user_id, 'loadingSeconds': 20}
     try:
-        response = requests.post('https://api.line.me/v2/bot/chat/loading/start', headers=headers, json=data)
-        response.raise_for_status()
-        print(f"ローディング表示成功: {user_id}")
+        requests.post('https://api.line.me/v2/bot/chat/loading/start', headers=headers, json=data)
     except requests.exceptions.RequestException as e:
         print(f"ローディング表示エラー: {e}")
 
-# --- Web検索関数 (変更なし) ---
+# --- Web検索関数 ---
 def google_search(query: str) -> dict:
     """最新の情報、特定の事実、時事問題、天気、株価など、リアルタイムの情報が必要な場合にウェブを検索します。"""
     print(f"Executing Google Search for: {query}")
@@ -68,18 +57,14 @@ def google_search(query: str) -> dict:
         res = service.cse().list(q=query, cx=search_engine_id, num=3).execute()
         if 'items' not in res:
             return {"result": "検索結果が見つかりませんでした。"}
-        search_results = []
-        for item in res['items']:
-            title = item.get('title', '')
-            link = item.get('link', '')
-            snippet = item.get('snippet', '').replace('\n', '')
-            search_results.append(f"タイトル: {title}\n概要: {snippet}\nURL: {link}")
+        search_results = [f"タイトル: {item.get('title', '')}\n概要: {item.get('snippet', '').replace('
+', '')}\nURL: {item.get('link', '')}" for item in res['items']]
         return {"search_results": "\n\n---\n\n".join(search_results)}
     except Exception as e:
         print(f"Google Search Error: {e}")
         return {"error": f"検索中にエラーが発生しました: {e}"}
 
-# --- Geminiモデルの初期化 (変更なし) ---
+# --- Geminiモデルの初期化 ---
 genai.configure(api_key=gemini_api_key)
 model = genai.GenerativeModel('gemini-1.5-flash', tools=[google_search])
 
@@ -88,23 +73,28 @@ app = Flask(__name__)
 line_bot_api = LineBotApi(channel_access_token)
 handler = WebhookHandler(channel_secret)
 
-# --- 会話履歴関連の関数 (変更なし) ---
+# --- 会話履歴関連の関数 (安定版に修正) ---
 def get_conversation_history(user_id):
     ref = db.reference(f'/conversation_history/{user_id}')
     history = ref.get()
     if history is None: return []
-    return [genai.types.Content(**msg) for msg in history][-MAX_HISTORY_LENGTH:]
+    # 辞書のリストとしてそのまま返す
+    return history[-MAX_HISTORY_LENGTH:]
 
 def save_conversation_history(user_id, history):
     ref = db.reference(f'/conversation_history/{user_id}')
-    serializable_history = [genai.types.Content.to_dict(msg) for msg in history]
+    # chat.historyはContentオブジェクトのリストなので、辞書に変換して保存
+    serializable_history = [
+        {'role': msg.role, 'parts': [{'text': part.text} for part in msg.parts]}
+        for msg in history
+    ]
     ref.set(serializable_history)
 
 def reset_conversation_history(user_id):
     ref = db.reference(f'/conversation_history/{user_id}')
     ref.delete()
 
-# --- 認証関連の関数 (変更なし) ---
+# --- 認証関連の関数 ---
 def is_user_authenticated(user_id):
     ref = db.reference(f'/authenticated_users/{user_id}')
     return ref.get() is not None
@@ -119,7 +109,7 @@ def authenticate_user(user_id, code):
         return True
     return False
 
-# --- Webhookの処理 (変更なし) ---
+# --- Webhookの処理 ---
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers['X-Line-Signature']
@@ -130,7 +120,7 @@ def callback():
         abort(400)
     return 'OK'
 
-# --- メッセージ処理を最終形態に！ ---
+# --- メッセージ処理 (安定版に修正) ---
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_id = event.source.user_id
@@ -150,43 +140,36 @@ def handle_message(event):
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text="会話の履歴をリセットしました。"))
         return
 
-    # --- ここからがメイン処理 ---
     try:
-        # 1. ローディング表示を開始 (NEW!)
         display_loading_animation(user_id)
-
-        # 2. 履歴を取得してチャットセッションを開始
-        history = get_conversation_history(user_id)
-        chat = model.start_chat(history=history)
-
-        # 3. ユーザーのメッセージを送信
-        response = chat.send_message(user_message)
         
-        # 4. 最終的な回答を取得
+        # 履歴を辞書のリストとして取得
+        history = get_conversation_history(user_id)
+        
+        # チャットセッションを開始
+        chat = model.start_chat(history=history)
+        
+        response = chat.send_message(user_message)
         reply_text = response.text
 
-        # 5. 検索が実行されたかチェック (NEW!)
+        # 検索が実行されたかチェック
         searched_web = False
-        # chat.historyにはユーザーの質問とAIの応答の全履歴が入っている
-        # 最後のAIの応答(から2番目)にtool_callsがあれば検索したと判断
-        if len(chat.history) > 1 and chat.history[-2].parts[0].function_call:
+        if len(chat.history) > 1 and hasattr(chat.history[-2].parts[0], 'function_call'):
             searched_web = True
 
-        # 6. 検索した場合、前置きを追加 (NEW!)
         if searched_web:
             reply_text = "🌐 Webで検索しました。\n\n" + reply_text
 
-        # 7. 最新の会話履歴を保存
+        # 最新の会話履歴を保存
         save_conversation_history(user_id, chat.history)
 
-        # 8. ユーザーに応答
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
 
     except Exception as e:
         app.logger.error(f"Main process error: {e}")
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text="申し訳ありません、エラーが発生しました。「/reset」で会話をリセットしてみてください。"))
 
-# --- 管理者用機能 (変更なし) ---
+# --- 管理者用機能 ---
 @app.route("/admin/add_code", methods=['GET'])
 def add_code():
     secret = request.args.get('secret')
@@ -197,7 +180,7 @@ def add_code():
     codes_ref.set(True)
     return jsonify({"status": "success", "added_code": new_code})
 
-# --- サーバー起動 (変更なし) ---
+# --- サーバー起動 ---
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
