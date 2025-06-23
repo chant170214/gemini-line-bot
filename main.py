@@ -27,7 +27,7 @@ search_engine_id = os.environ.get("SEARCH_ENGINE_ID", "")
 # --- 定数 ---
 MAX_HISTORY_LENGTH = 20
 JST = pytz.timezone('Asia/Tokyo')
-PRO_MODE_LIMIT = 5 # ★★★ Proモードの1日の上限回数をここで設定 ★★★
+PRO_MODE_LIMIT = 5 
 
 # --- Firebaseの初期化 ---
 try:
@@ -76,16 +76,14 @@ app = Flask(__name__)
 line_bot_api = LineBotApi(channel_access_token)
 handler = WebhookHandler(channel_secret)
 
-# --- Proモード利用回数制限の関数 (回数設定可能版) ---
+# --- Proモード利用回数制限の関数 ---
 def check_pro_quota(user_id):
-    """Proモードの利用回数をチェック。上限に達していなければTrueを返す"""
     today_jst_str = datetime.now(JST).strftime('%Y-%m-%d')
     ref = db.reference(f'/pro_usage/{user_id}/{today_jst_str}')
     usage_count = ref.get() or 0
     return usage_count < PRO_MODE_LIMIT
 
 def record_pro_usage(user_id):
-    """Proモードの利用を記録する"""
     today_jst_str = datetime.now(JST).strftime('%Y-%m-%d')
     ref = db.reference(f'/pro_usage/{user_id}/{today_jst_str}')
     def increment(current_count):
@@ -144,7 +142,9 @@ def callback():
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_id = event.source.user_id
-    user_message = event.message.strip()
+    # ↓↓↓ ここのバグを修正しました！ ↓↓↓
+    user_message = event.message.text.strip()
+    # ↑↑↑ ここまでが修正箇所です！ ↑↑↑
 
     if not is_user_authenticated(user_id):
         if authenticate_user(user_id, user_message):
