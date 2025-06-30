@@ -6,3 +6,5 @@ firebase-admin
 google-api-python-client
 requests
 pytz
+requests
+beautifulsoup4
