@@ -9,3 +9,4 @@ pytz
 gunicorn
 flask-rq2
 redis
+setuptools
