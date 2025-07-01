@@ -17,6 +17,9 @@ class Config:
     FIREBASE_CREDENTIALS_JSON = os.environ.get("FIREBASE_CREDENTIALS_JSON")
     SEARCH_API_KEY = os.environ.get("SEARCH_API_KEY")
     SEARCH_ENGINE_ID = os.environ.get("SEARCH_ENGINE_ID")
+    
+    # 【追加】RenderのRedisアドオンを使用する場合、環境変数 'REDIS_URL' が自動で設定されます
+    RQ_REDIS_URL = os.environ.get("REDIS_URL")
 
     # 固定値
     MAX_HISTORY_LENGTH = 20
