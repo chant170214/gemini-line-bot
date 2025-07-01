@@ -1,10 +1,11 @@
-flask
+Flask
 line-bot-sdk
 google-generativeai==0.7.1
-gunicorn
-firebase-admin
 google-api-python-client
-requests
-pytz
+firebase-admin
 requests
 beautifulsoup4
+pytz
+gunicorn
+flask-rq2
+redis
