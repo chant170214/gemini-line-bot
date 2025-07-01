@@ -64,7 +64,7 @@ def display_loading_animation(user_id):
         app.logger.warning(f"ローディング表示API呼び出しエラー: {e}")
 
 
-def google_search(query: str):
+def Google Search(query: str):
     app.logger.info(f"Google検索を実行: {query}")
     if not Config.SEARCH_API_KEY or not Config.SEARCH_ENGINE_ID:
         return []
@@ -290,50 +290,76 @@ def cmd_search(event: MessageEvent, user_id: str, query: str):
 
     display_loading_animation(user_id)
 
-    search_results = google_search(query)
-
-    if not search_results:
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="関連する情報が見つかりませんでした。"))
-        return
-
-    scraped_contents, referenced_urls = [], []
-    for result in search_results[:2]:
-        url = result.get('link')
-        if not url:
-            continue
-
-        app.logger.info(f"サイトを読み込み中: {url}")
-        text, error_message = extract_text_from_url(url)
-
-        if text and not error_message:
-            scraped_contents.append(f"--- 参照サイト: {url} ---\n\n{text[:7000]}")
-            referenced_urls.append(url)
-        else:
-            app.logger.warning(f"サイトの読み込みに失敗: {url}, 理由: {error_message}")
-
-    if not scraped_contents:
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="Webサイトの中身を読み取れませんでした。"))
-        return
-
-    combined_text = "\n\n".join(scraped_contents)
-    prompt = (
-        f"あなたは優秀な調査アシスタントです。以下のWebサイトの情報とユーザーの質問を元に、回答を生成してください。\n\n"
-        f"■ ユーザーの質問:\n{query}\n\n"
-        f"■ 参照したWebサイトの情報:\n{combined_text}\n\n"
-        f"■ 回答のルール:\n"
-        f"- ユーザーの質問に対する直接的な答えを、まず最初に明確に記述してください。\n"
-        f"- その後、背景や詳細、重要なポイントを箇条書きなども活用して分かりやすく説明してください。\n"
-        f"- 日本語で、自然で丁寧な文章で回答してください。"
-    )
-
     try:
-        response = models['flash'].generate_content(prompt)
-        reply_text = f"🌐 Webで詳しく調査しました。\n\n{response.text}"
+        # --- ここからが新しいロジック ---
+        # 1. 会話履歴を取得
+        history = get_conversation_history(user_id)
+        
+        # 2. 履歴と今回のクエリを元に、最適な検索キーワードをAIに考えさせる
+        keyword_generation_prompt = (
+            f"あなたは優秀な検索アシスタントです。以下の会話履歴と最後のユーザーの要求を踏まえて、"
+            f"ユーザーが本当に知りたい情報を調査するための、最も的確なGoogle検索キーワードを一つだけ生成してください。\n"
+            f"生成するのはキーワードのみにしてください。説明や余計な言葉は不要です。\n\n"
+            f"--- 会話履歴 ---\n{history}\n\n"
+            f"--- 最後のユーザー要求 ---\n/search {query}\n\n"
+            f"--- 最適な検索キーワード ---\n"
+        )
+
+        # Flashモデルで高速にキーワードを生成
+        response_keyword = models['flash'].generate_content(keyword_generation_prompt)
+        optimized_query = response_keyword.text.strip()
+        app.logger.info(f"元のクエリ: '{query}' -> AIが生成した検索キーワード: '{optimized_query}'")
+        # --- 新しいロジックここまで ---
+
+        # 3. AIが生成したキーワードでGoogle検索を実行
+        search_results = Google Search(optimized_query)
+
+        if not search_results:
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"「{optimized_query}」に関連する情報が見つかりませんでした。"))
+            return
+
+        # 4. Webサイトから情報を抽出（ここは元のロジックと同じ）
+        scraped_contents, referenced_urls = [], []
+        for result in search_results[:2]: # 上位2件を処理
+            url = result.get('link')
+            if not url:
+                continue
+
+            app.logger.info(f"サイトを読み込み中: {url}")
+            text, error_message = extract_text_from_url(url)
+
+            if text and not error_message:
+                # 7000文字に制限して長文サイトに対応
+                scraped_contents.append(f"--- 参照サイト: {url} ---\n\n{text[:7000]}")
+                referenced_urls.append(url)
+            else:
+                app.logger.warning(f"サイトの読み込みに失敗: {url}, 理由: {error_message}")
+
+        if not scraped_contents:
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="Webサイトの中身を読み取れませんでした。"))
+            return
+            
+        # 5. 抽出した情報とAIが生成したキーワードを元に、回答を生成
+        combined_text = "\n\n".join(scraped_contents)
+        summarize_prompt = (
+            f"あなたは優秀な調査アシスタントです。以下のWebサイトの情報とユーザーの質問（検索キーワード）を元に、回答を生成してください。\n\n"
+            f"■ ユーザーの質問（検索キーワード）:\n{optimized_query}\n\n"
+            f"■ 参照したWebサイトの情報:\n{combined_text}\n\n"
+            f"■ 回答のルール:\n"
+            f"- ユーザーの質問に対する直接的な答えを、まず最初に明確に記述してください。\n"
+            f"- その後、背景や詳細、重要なポイントを箇条書きなども活用して分かりやすく説明してください。\n"
+- 日本語で、自然で丁寧な文章で回答してください。"
+        )
+
+        # 回答生成はFlashモデルを使用
+        response_summary = models['flash'].generate_content(summarize_prompt)
+        reply_text = f"🌐 Webで「{optimized_query}」について詳しく調査しました。\n\n{response_summary.text}"
 
         if referenced_urls:
             reply_text += "\n\n【参考にしたサイト】\n" + "\n".join(f"・{url}" for url in referenced_urls)
 
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
+
     except Exception as e:
         app.logger.error(f"Search/Summarize Error: {e}", exc_info=True)
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text="回答の生成中にエラーが発生しました。"))
