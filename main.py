@@ -20,7 +20,7 @@ from flask import Flask, abort, jsonify, request
 from flask_rq2 import RQ
 from googleapiclient.discovery import build
 from linebot import LineBotApi, WebhookHandler
-from linebot.exceptions import InvalidSignatureError
+from linebot.exceptions import InvalidSignatureError, LineBotApiError # <= LineBotApiError をインポート
 from linebot.models import (ImageMessage, MessageEvent, TextMessage,
                             TextSendMessage)
 
@@ -123,11 +123,10 @@ def run_search_task(user_id: str, query: str):
         app.logger.error(f"非同期検索タスクでエラーが発生: {e}", exc_info=True)
         task_line_bot_api.push_message(user_id, TextSendMessage(text=f"調査中にエラーが発生しました。\n質問: {query}\nしばらくしてからもう一度お試しください。"))
 
-
-# --- データベース関連関数 (変更なし) ---
+# --- データベース関連関数 ---
 def get_db_reference(path_template: str, **kwargs):
     return db.reference(path_template.format(**kwargs))
-# (以下、get_user_mode, set_user_modeなどのDB関数は元のコードと同じなので省略)
+
 def get_user_mode(user_id: str):
     ref = get_db_reference('/user_settings/{user_id}/mode', user_id=user_id)
     return ref.get() or 'flash'
@@ -182,8 +181,7 @@ def display_loading_animation(user_id):
         app.logger.warning(f"ローディング表示API呼び出しエラー: {e}")
 
 def refine_search_query(user_id: str, current_query: str):
-    """【新規】会話の文脈を考慮して、曖昧な検索クエリを具体的なものに変換する"""
-    # クエリが十分具体的であれば、そのまま返す
+    """会話の文脈を考慮して、曖昧な検索クエリを具体的なものに変換する"""
     if len(current_query) > 15 or ' ' in current_query or 'とは' in current_query:
         return current_query
 
@@ -191,7 +189,6 @@ def refine_search_query(user_id: str, current_query: str):
     if not history:
         return current_query
 
-    # 最後のユーザー発言（現在のクエリ自身を除く）を文脈として取得
     last_user_message = ""
     for msg in reversed(history):
         if msg.get('role') == 'user':
@@ -203,7 +200,6 @@ def refine_search_query(user_id: str, current_query: str):
     if not last_user_message:
         return current_query
     
-    # Geminiを使って、文脈を考慮した検索クエリを生成させる
     try:
         prompt = f"""以下の会話の文脈を踏まえて、ユーザーの新しい発言を、Web検索に適した具体的な検索キーワードに変換してください。
 
@@ -221,9 +217,9 @@ def refine_search_query(user_id: str, current_query: str):
         return refined_query
     except Exception as e:
         app.logger.error(f"クエリ補完中のAIエラー: {e}")
-        return current_query # エラー時は元のクエリをそのまま使う
+        return current_query
 
-# --- メインハンドラとロジック (変更なしの部分はコメントで省略) ---
+# --- メインハンドラとロジック ---
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers['X-Line-Signature']
@@ -236,6 +232,7 @@ def callback():
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_text_message(event: MessageEvent):
+    """テキストメッセージを処理する"""
     user_id = event.source.user_id
     user_message = event.message.text.strip()
     try:
@@ -247,11 +244,19 @@ def handle_text_message(event: MessageEvent):
             handle_conversation(event, user_id, user_message)
     except Exception as e:
         app.logger.error(f"テキストメッセージ処理中に予期せぬエラー: {e}", exc_info=True)
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="申し訳ありません、エラーが発生しました。「/reset」で会話をリセットしてみてください。"))
+        try:
+            # 【修正箇所】エラーメッセージの返信を試みる
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text="申し訳ありません、エラーが発生しました。「/reset」で会話をリセットしてみてください。")
+            )
+        except LineBotApiError as api_error:
+            # ここで Invalid reply token エラーが発生しても、それは既に何らかの返信済みの証拠。
+            # エラーの連鎖を防ぐため、ログに出力するだけでプログラムは止めない。
+            app.logger.error(f"エラーメッセージの返信にも失敗しました: {api_error}")
 
 @handler.add(MessageEvent, message=ImageMessage)
-def handle_image_message(event: MessageEvent): # (変更なし)
-    # (元のコードと同じ)
+def handle_image_message(event: MessageEvent):
     user_id = event.source.user_id
     try:
         if not is_user_authenticated(user_id):
@@ -270,8 +275,7 @@ def handle_image_message(event: MessageEvent): # (変更なし)
         app.logger.error(f"画像処理中に予期せぬエラー: {e}", exc_info=True)
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text="申し訳ありません、画像の処理中にエラーが発生しました。"))
 
-def handle_authentication(event: MessageEvent, user_id: str, code: str): # (変更なし)
-    # (元のコードと同じ)
+def handle_authentication(event: MessageEvent, user_id: str, code: str):
     if authenticate_user(user_id, code):
         welcome_message = "認証が完了しました。ご質問をどうぞ。"
         command_list = (
@@ -285,8 +289,7 @@ def handle_authentication(event: MessageEvent, user_id: str, code: str): # (変�
     else:
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text="認証コードを入力してください。"))
     
-def handle_conversation(event: MessageEvent, user_id: str, user_message: str): # (変更なし)
-    # (元のコードと同じ、ただし会話履歴の保存を追加)
+def handle_conversation(event: MessageEvent, user_id: str, user_message: str):
     display_loading_animation(user_id)
     user_mode = get_user_mode(user_id)
     active_model, mode_icon = (models['flash'], "⚡️")
@@ -299,25 +302,21 @@ def handle_conversation(event: MessageEvent, user_id: str, user_message: str): #
             line_bot_api.push_message(user_id, TextSendMessage(text=limit_message))
 
     history = get_conversation_history(user_id)
-    # ユーザーの発言を履歴に保存
     history.append({'role': 'user', 'parts': [{'text': user_message}]})
     
     response = active_model.generate_content(history)
     reply_text = response.text
 
-    # モデルの応答も履歴に保存
     history.append({'role': 'model', 'parts': [{'text': reply_text}]})
     save_conversation_history(user_id, history)
 
     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"{mode_icon} {reply_text}"))
 
 def handle_command(event: MessageEvent, user_id: str, user_message: str):
-    """【改修】コマンド処理。/searchはcmd_searchを呼び出す"""
     parts = user_message.split(' ', 1)
     command = parts[0].lower()
     args = parts[1].strip() if len(parts) > 1 else ""
 
-    # ユーザーのコマンドも会話履歴に保存
     history = get_conversation_history(user_id)
     history.append({'role': 'user', 'parts': [{'text': user_message}]})
     save_conversation_history(user_id, history)
@@ -335,38 +334,34 @@ def handle_command(event: MessageEvent, user_id: str, user_message: str):
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"不明なコマンドです: {command}"))
 
 # --- 各コマンド ---
-def cmd_reset(event: MessageEvent, user_id: str, args: str): # (変更なし)
+def cmd_reset(event: MessageEvent, user_id: str, args: str):
     reset_conversation_history(user_id)
     line_bot_api.reply_message(event.reply_token, TextSendMessage(text="会話の履歴をリセットしました。"))
 
-def cmd_pro(event: MessageEvent, user_id: str, args: str): # (変更なし)
+def cmd_pro(event: MessageEvent, user_id: str, args: str):
     set_user_mode(user_id, 'pro')
     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"🤖 高精度モード (Pro) に切り替えました。\n(上限: {Config.PRO_MODE_LIMIT}回/日)"))
 
-def cmd_flash(event: MessageEvent, user_id: str, args: str): # (変更なし)
+def cmd_flash(event: MessageEvent, user_id: str, args: str):
     set_user_mode(user_id, 'flash')
     line_bot_api.reply_message(event.reply_token, TextSendMessage(text="⚡️ 高速モード (Flash) に切り替えました。"))
 
 def cmd_search(event: MessageEvent, user_id: str, query: str):
-    """【全面改修】Web検索を非同期で実行する"""
     if not query:
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text="検索キーワードを入力してください。\n例: /search 今日のニュース"))
         return
 
-    # 会話の文脈を考慮して検索クエリを洗練させる
     refined_query = refine_search_query(user_id, query)
 
-    # ユーザーには即座に応答を返し、重い処理はバックグラウンドに任せる
     line_bot_api.reply_message(
         event.reply_token,
         TextSendMessage(text=f"「{refined_query}」についてWebでの調査を開始します。\n完了したら通知しますね！")
     )
     
-    # 非同期タスクをキューに追加
     run_search_task.queue(user_id, refined_query)
 
 # --- 管理用認証コード生成 ---
-@app.route("/admin/add_code", methods=['GET']) # (変更なし)
+@app.route("/admin/add_code", methods=['GET'])
 def add_code():
     secret = request.args.get('secret')
     if secret != Config.ADMIN_SECRET:
@@ -380,4 +375,3 @@ def add_code():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
-
